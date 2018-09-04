@@ -9,7 +9,7 @@ import dynet as dy
 seed(1)
 
 from data import read_dataset, UNK, EOS, NONE, WF, LEMMA, MSD
-VERBOSE=1
+VERBOSE=0
 EARLY_STOPPING = True
 LSTM_NUM_OF_LAYERS = 1
 EMBEDDINGS_SIZE = 100
@@ -26,13 +26,17 @@ def iscandidatemsd(msd):
     """ We only consider nouns, verbs and adjectives. """
     return msd.split(';')[0] in ['N','V','ADJ']
 
-def init_model(wf2id,lemma2id,char2id,msd2id):
-    global model, enc_fwd_lstm, enc_bwd_lstm, dec_lstm, character_lookup,\
-    word_lookup, lemma_lookup, msd_lookup, attention_w1, attention_w2, \
-    attention_v, decoder_w, decoder_b, output_lookup, dec_msd_lstm, decoder_msd_w, \
-    decoder_msd_b, output_msd_lookup, context_fwd_lstm, context_bwd_lstm
-
+def init_model():
+    global model
     model = dy.Model()
+
+def init_monolingual_params(wf2id,lemma2id,char2id,msd2id,languages):
+    global monolingual_params
+    monolingual_params = {}
+    for lang in languages:
+        monolingual_params[lang] = _init_monolingual_params(wf2id[lang],lemma2id[lang],char2id[lang],msd2id[lang])
+
+def _init_monolingual_params(wf2id,lemma2id,char2id,msd2id):
 
     num_embedded_context_items=8
     enc_fwd_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, 2*STATE_SIZE+2*EMBEDDINGS_SIZE, STATE_SIZE, model)
@@ -52,13 +56,20 @@ def init_model(wf2id,lemma2id,char2id,msd2id):
     decoder_b = model.add_parameters( (len(char2id)))
     output_lookup = model.add_lookup_parameters((len(char2id), EMBEDDINGS_SIZE))#TO DO use the same lookup param for input and output
 
-    dec_msd_lstm =  dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, 2*STATE_SIZE+2*EMBEDDINGS_SIZE, STATE_SIZE, model)# dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, STATE_SIZE*2+EMBEDDINGS_SIZE, STATE_SIZE, model)
-    decoder_msd_w = model.add_parameters( (len(msd2id), STATE_SIZE))
-    decoder_msd_b = model.add_parameters( (len(msd2id)))
-    output_msd_lookup = model.add_lookup_parameters((len(msd2id_split), EMBEDDINGS_SIZE))#TO DO use the same lookup param for input and output
-
     context_fwd_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, 3*EMBEDDINGS_SIZE, STATE_SIZE, model)
     context_bwd_lstm = dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, 3*EMBEDDINGS_SIZE, STATE_SIZE, model)
+
+    return enc_fwd_lstm, enc_bwd_lstm, dec_lstm, character_lookup,\
+        word_lookup, lemma_lookup, msd_lookup, attention_w1, attention_w2, \
+        attention_v, decoder_w, decoder_b, output_lookup, context_fwd_lstm, context_bwd_lstm
+
+def init_shared_params(msd2id_split):
+    global dec_msd_lstm, decoder_msd_w, decoder_msd_b, output_msd_lookup
+
+    dec_msd_lstm =  dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, 2*STATE_SIZE+2*EMBEDDINGS_SIZE, STATE_SIZE, model)# dy.LSTMBuilder(LSTM_NUM_OF_LAYERS, STATE_SIZE*2+EMBEDDINGS_SIZE, STATE_SIZE, model)
+    decoder_msd_w = model.add_parameters( (len(msd2id_split), STATE_SIZE))
+    decoder_msd_b = model.add_parameters( (len(msd2id_split)))
+    output_msd_lookup = model.add_lookup_parameters((len(msd2id_split), EMBEDDINGS_SIZE))#TO DO use the same lookup param for input and output
 
 
 def embed(lemma,context):
@@ -204,6 +215,7 @@ def generate(i, s, id2x, generate_char=True):
         out_vector = w * s.output() + b
         probs = dy.softmax(out_vector).vec_value()
         next_char = probs.index(max(probs))
+        #if not generate_char: import pdb; pdb.set_trace()
         last_output_embeddings = output_x_lookup[next_char]
         if id2x[next_char] == EOS:
             count_EOS += 1
@@ -279,7 +291,7 @@ def get_loss(i, s, validation=False):
     if s[i][MSD] is not NONE and iscandidatemsd(s[i][MSD]) and not validation: #this ensures that MSD is not predicted in track 2
         #loss_msd = decode(first_and_last, s[i][MSD].split(';'), False)
         loss_msd = decode(context, s[i][MSD].split(';'), False)
-        return dy.esum([loss,loss_msd])
+        return dy.esum([0.7*loss,0.3*loss_msd])
     else: return loss
 
 def memolrec(func):
@@ -315,8 +327,9 @@ def levenshtein(s, t, inscost = 1.0, delcost = 1.0, substcost = 1.0):
     answer = lrec('', '', s, t, 0)
     return answer[0],answer[1],answer[4]
 
-def eval(devdata,id2char, val_loss, best_epoch, generating=1, outf=None, out_scores=None):
+def eval(devdata, val_loss, best_epoch, generating=1, outf=None, out_scores=None):
     if VERBOSE: print('Predicting development data with best model...')
+    model.populate('{}/model'.format(exp_path))
     input, gold = devdata
     corr = 0.0
     lev=0.0
@@ -338,19 +351,20 @@ def eval(devdata,id2char, val_loss, best_epoch, generating=1, outf=None, out_sco
         if outf:
             outf.write('\n')
 
-    to_print = exp_name+'\t'
+    to_print = ''
     total_time = time() - start_time
     if out_scores is not None:
         for lab, item in zip(['Dev set accuracy','Lev dist','Val loss' ,'Epoch', 'Time'],[corr/tot*100, lev/tot, val_loss, best_epoch, total_time]):
             out_scores.write('{}: {}\n'.format(lab,str(item)))
             to_print+='%.2f\t' % item
-        to_print+='\n'
-    print(to_print)
+        #to_print+='\n'
+    #print(to_print)
 
-    return (0,0) if tot == 0 else (corr / tot, lev/tot)
+    return (0,0, 0) if tot == 0 else (corr/tot, lev/tot, to_print)
 
-def eval_msd(devdata,id2msd,generating=1, outf=None, out_scores=None):
+def eval_msd(devdata,generating=1, outf=None, out_scores=None):
     if VERBOSE: print('Predicting development data with best model...')
+    model.populate('{}/model'.format(exp_path))
     input, gold = devdata
     corr = 0.0
     lev=0.0
@@ -360,79 +374,117 @@ def eval_msd(devdata,id2msd,generating=1, outf=None, out_scores=None):
         for i,fields in enumerate(s):
             dy.renew_cg()
             wf, lemma, msd = fields
-            if iscandidatemsd(gold[n][i][MSD]) and lemma != NONE:
+            if iscandidatemsd(gold[n][i][MSD]):
                 if generating:
-                    msd = generate(i,s,id2msd,generate_char=False)
+                    msd = generate(i,s,id2msd_split, generate_char=False)
                 if msd == gold[n][i][MSD]:
                     corr += 1
                 lev += levenshtein(msd,gold[n][i][MSD])[2]
                 tot += 1
                 msd = gold[n][i][MSD]#for all words that are not actual targets, write out their real label
             if gold[n][i][MSD] is NONE and generating:
-                msd = generate(i,s,id2msd,generate_char=False)
+                msd = generate(i,s,id2msd_split,generate_char=False)
             if outf:
                 outf.write('%s\n' % '\t'.join([wf,lemma,msd]))
         if outf:
             outf.write('\n')
-    corr_over_tot = corr/tot*100 if tot!=0 else 0
-    lev_over_tot = lev/tot if tot!=0 else 0
+
     if out_scores is not None:
-        for lab, item in zip(['Dev set accuracy MSD','Lev dist MSD'],[corr_over_tot, lev_over_tot]):
+        for lab, item in zip(['Dev set accuracy MSD','Lev dist MSD'],[corr/tot*100, lev/tot]):
             out_scores.write('{}: {}\n'.format(lab,str(item)))
+    to_print = corr/tot*100
+    return (0,0,0) if tot == 0 else (corr / tot, lev/tot, to_print)
 
-    return (0,0) if tot == 0 else (corr / tot, lev/tot)
+def set_language(lang):
+    global enc_fwd_lstm, enc_bwd_lstm, dec_lstm, character_lookup,\
+    word_lookup, lemma_lookup, msd_lookup, attention_w1, attention_w2, \
+    attention_v, decoder_w, decoder_b, output_lookup, context_fwd_lstm, context_bwd_lstm, \
+    wf2id,lemma2id,char2id,id2char,msd2id
 
-def run_epoch(data, trainer=None, training=True):
-    if training: shuffle(data)
-    total_loss = 0
-    # train on 90% of data
-    for n,s in enumerate(data):
+    enc_fwd_lstm, enc_bwd_lstm, dec_lstm, character_lookup,\
+    word_lookup, lemma_lookup, msd_lookup, attention_w1, attention_w2, \
+    attention_v, decoder_w, decoder_b, output_lookup, context_fwd_lstm, context_bwd_lstm = monolingual_params[lang]
+
+    wf2id,lemma2id,char2id,id2char,msd2id = wf2id_dict[lang],lemma2id_dict[lang],char2id_dict[lang],id2char_dict[lang],msd2id_dict[lang]
+
+def predict(testdata,lang, outf):
+    input = testdata
+    set_language(lang)
+    for n,s in enumerate(input):
         for i,fields in enumerate(s):
+            dy.renew_cg()
             wf, lemma, msd = fields
-            if VERBOSE and training: stdout.write("Example %u of %u\r" %
-                         (n+1,len(data)))
-            if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
-               and random() < SAMPLETRAIN:
-                loss = get_loss(i, s)
-                if training:
-                    loss.backward()
-                    trainer.update()
-                loss_value = loss.value()
-                total_loss += loss_value
-    return total_loss
+            if msd == NONE and lemma != NONE:
+                wf = generate(i,s,id2char,lang)
+            outf.write('%s\n' % '\t'.join([wf,lemma,msd]))
+        outf.write('\n')
 
-def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,id2msd,epochs=20):
+def train(traindata,devdata,epochs=20,finetuning=False):
     trainer = dy.AdamTrainer(model)
-    #trainer.learning_rate=0.0001
-
-    valdata = traindata[int(0.7*len(traindata)):int(0.8*len(traindata))] #hold out 10% for validation loss
-    traindata = traindata[:int(0.7*len(traindata))]+traindata[int(0.8*len(traindata)):] #use only the other 90% for training
+    if finetuning:
+        trainer.learning_rate=0.0001
+    
+    valdata = {lang: traindata[lang][int(0.7*len(traindata[lang])):int(0.8*len(traindata[lang]))] for lang in languages} #hold out 10% for validation loss
+    traindata = {lang: traindata[lang][:int(0.7*len(traindata[lang]))]+traindata[lang][int(0.8*len(traindata[lang])):] for lang in languages} #use only the other 90% for training
     prev_best_loss = 10000
     best_epoch = 0
     n_no_improvement = 0
+    shortest_subset = min([len(traindata[lang]) for lang in languages])
     for epoch in range(epochs):
         if VERBOSE: print("EPOCH %u" % (epoch + 1))
-        total_train_loss = run_epoch(traindata,trainer)
-        total_val_loss = run_epoch(valdata,trainer,False)
+        for lang in languages: shuffle(traindata[lang])
+        total_train_loss, multilingual_val_loss = 0, 0
+        # train on 90% of data
 
-        if VERBOSE:
-            print("\nTraining loss per sentence: %.3f" % (total_train_loss/int(len(traindata)*SAMPLETRAIN)))
-            print("Validation loss per sentence: %.3f" % (total_val_loss/int(len(valdata)*SAMPLETRAIN)))
-            print("Example outputs:")
-        for s in valdata[5:15]:
-            for i,fields in enumerate(s):
-                wf, lemma, msd = fields
-                if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
-                   and random() < SAMPLETRAIN:
-                    if VERBOSE: print("INPUT:", s[i][LEMMA], "OUTPUT:",
-                         generate(i,s,id2char),
-                         "GOLD:",wf)
-                    break
+        for n in range(shortest_subset):
+            shuffle(languages)
+            for lang in languages:
+                set_language(lang)
+                s = traindata[lang][n]
+                for i,fields in enumerate(s):
+                    wf, lemma, msd = fields
+                    if VERBOSE: stdout.write("Example %u of %u\r" %
+                                 (n+1,len(traindata[lang])))
+                    if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
+                       and random() < SAMPLETRAIN:
+                        loss = get_loss(i, s)
+                        loss.backward()
+                        loss_value = loss.value()
+                        total_train_loss += loss_value
+                        trainer.update()
+
+        # compute loss on the other 10% without backproping it
+        for lang in languages:
+            total_val_loss = 0
+            set_language(lang)
+            for n,s in enumerate(valdata[lang]):
+                for i,fields in enumerate(s):
+                    wf, lemma, msd = fields
+                    if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
+                       and random() < SAMPLETRAIN:
+                        loss = get_loss(i, s, validation=True)
+                        loss_value = loss.value()
+                        total_val_loss += loss_value
+            if VERBOSE:
+                print("\nTraining loss per sentence: %.3f" % (total_train_loss/int(len(traindata[lang])*SAMPLETRAIN)))
+                print("Validation loss per sentence: %.3f" % (total_val_loss/int(len(valdata[lang])*SAMPLETRAIN)))
+                print("Example outputs:")
+
+                for s in valdata[lang][2:4]:
+                    for i,fields in enumerate(s):
+                        wf, lemma, msd = fields
+                        if (iscandidatemsd(msd) or (msd == NONE and lemma != NONE))\
+                           and random() < SAMPLETRAIN:
+                            if VERBOSE: print("INPUT:", s[i][LEMMA], "OUTPUT:",
+                                 generate(i,s,id2char),
+                                 "GOLD:",wf)
+                            break
+            multilingual_val_loss+=total_val_loss/len(valdata[lang])
         #save best model so far
-        if total_val_loss/(len(valdata)*SAMPLETRAIN) < prev_best_loss:
+        if multilingual_val_loss < prev_best_loss:
             if VERBOSE: print('+++++++New best dev loss++++++')
             model.save('{}/model'.format(exp_path))
-            prev_best_loss = total_val_loss/(len(valdata)*SAMPLETRAIN)
+            prev_best_loss = multilingual_val_loss
             best_epoch = epoch+1
             n_no_improvement = 0
         else: n_no_improvement +=1
@@ -440,38 +492,77 @@ def train(traindata,devdata,wf2id,lemma2id,char2id,id2char,msd2id,id2msd,epochs=
         #early stopping
         if (n_no_improvement == 5 and EARLY_STOPPING) or epoch == epochs-1:
             if VERBOSE: print('Early stopping after 5 epochs of no improvement...') if n_no_improvement == 5 else print('Finished training...')
-            trainer.learning_rate=0.0001
-            model.populate('{}/model'.format(exp_path))#reload best model
-            for j in range(3):#train model on validation data
-                if VERBOSE: print('Fine-tuning on validation')
-                run_epoch(valdata, trainer)
-                model.save('{}/model'.format(exp_path))
-            devacc, devlev = eval(devdata,id2char,
-                 prev_best_loss,best_epoch,
-                 generating=1,
-                 outf=open("{}/out".format(exp_path),"w"),
-                 out_scores=open("{}/scores".format(exp_path),"w"))
-            eval_msd(devdata,id2msd,
-                 generating=1,
-                 outf=open("{}/out_msd".format(exp_path),"w"),
-                 out_scores=open("{}/scores_msd".format(exp_path),"w"))
-            if VERBOSE:
-                print("Development set accuracy for best model: %.2f" % (100*devacc))
-                print("Development set avg. Levenshtein distance: %.2f" % devlev)
-                print()
+            for lang in languages:
+                set_language(lang)
+                devacc, devlev, to_print = eval((devdata[0][lang],devdata[1][lang]),
+                     prev_best_loss,best_epoch,
+                     generating=1,
+                     outf=open("{}/{}_out".format(exp_path,lang),"w"),
+                     out_scores=open("{}/{}_scores".format(exp_path,lang),"w"))
+                _,_,to_print_msd = eval_msd((devdata[0][lang],devdata[1][lang]),
+                     generating=1,
+                     outf=open("{}/{}_out_msd".format(exp_path,lang),"w"),
+                     out_scores=open("{}/{}_scores_msd".format(exp_path,lang),"w"))
+                print(exp_name+' '+lang+'\t'+str(to_print)+str(to_print_msd)+'\n')
+                if VERBOSE:
+                    print("Development set accuracy for best %s model: %.2f" % (lang, 100*devacc))
+                    print("Development set avg. Levenshtein %s distance: %.2f" % (lang,devlev))
+                    print()
             break
 
 if __name__=='__main__':
-    exp_name = str(sysargv[4])
-    exp_path = 'dumped/'+exp_name+'_'+strftime("%Y-%m-%d,%H:%M:%S", localtime())
-    subprocess.Popen("mkdir %s" % exp_path, shell=True).wait()
-    if VERBOSE: print('The experiment will be saved in {}/'.format(exp_path))
-    traindata, wf2id, lemma2id, char2id, msd2id, msd2id_split = read_dataset(sysargv[1])
-    devinputdata, _, _, _, _, _ = read_dataset(sysargv[2])
-    devgolddata, _, _, _, _, _ = read_dataset(sysargv[3])
 
-    id2char = {id:char for char,id in char2id.items()}
-    id2msd =  {id:msd for msd,id in msd2id_split.items()}
-    init_model(wf2id,lemma2id,char2id,msd2id)
-    train(traindata,[devinputdata,devgolddata],
-          wf2id,lemma2id,char2id,id2char,msd2id,id2msd,20)
+    exp_name = str(sysargv[5])
+    exp_path = 'dumped/'+exp_name
+    global wf2id_dict, lemma2id_dict, char2id_dict, id2char_dict, msd2id_dict, msd2id_split, id2msd_split,languages
+    languages = str(sysargv[1]).split(',')
+    traindata, devinputdata, devgolddata, wf2id_dict, lemma2id_dict, char2id_dict, msd2id_dict, id2char_dict, msd2id_split_monolingual, id2msd_split = {},{},{},{},{},{},{},{},{},{}
+
+    for lang in languages:
+        traindata[lang], wf2id_dict[lang], lemma2id_dict[lang], char2id_dict[lang], msd2id_dict[lang], \
+            msd2id_split_monolingual[lang] = read_dataset(sysargv[2].format(lang))
+        devinputdata[lang], _, _, _, _, _ = read_dataset(sysargv[3].format(lang))
+        devgolddata[lang], _, _, _, _, _ = read_dataset(sysargv[4].format(lang))
+
+        id2char_dict[lang] = {id:char for char,id in char2id_dict[lang].items()}
+
+    all_msd_splits = []
+    for i,lang in enumerate(languages):
+        if i==0: all_msd_splits+=msd2id_split_monolingual[lang].keys()
+        else:
+            for m in msd2id_split_monolingual[lang].keys():
+                if m not in all_msd_splits: all_msd_splits.append(m)
+
+    msd2id_split = {i:j for j,i in enumerate(all_msd_splits)}
+    id2msd_split =  {id:msd for msd,id in msd2id_split.items()}
+
+    init_model()
+    init_shared_params(msd2id_split)
+    init_monolingual_params(wf2id_dict,lemma2id_dict,char2id_dict,msd2id_dict,languages)
+
+    mode = str(sysargv[6])
+    if mode == 'training':
+        subprocess.Popen("mkdir %s" % exp_path, shell=True).wait()
+        if VERBOSE: print('The experiment will be saved in {}/'.format(exp_path))
+        train(traindata,[devinputdata,devgolddata],50)
+    elif mode == 'finetuning':
+        ori_exp_path = exp_path
+        ori_exp_name = exp_name
+        model.populate('{}/model'.format(ori_exp_path))
+        finetune_languages = sysargv[7].strip().split(',')
+        for lang in finetune_languages:
+            exp_path = ori_exp_path+'_'+lang
+            exp_name = ori_exp_name+'_'+lang
+            languages=[lang]
+            subprocess.Popen("mkdir %s" % exp_path, shell=True).wait()
+            if VERBOSE: print('The experiment will be saved in {}/'.format(exp_path))
+            train(traindata,[devinputdata,devgolddata],
+                epochs=5, finetuning=True)
+    elif mode == 'testing':
+        test_language=sysargv[7]
+        setting = sysargv[8]
+        exp_path = 'dumped/'+exp_name#+'_'+lang
+        model.populate('dumped/{}/model'.format(exp_name))
+        testdata_path = 'testsets/{}-track1-covered'.format(test_language)
+        testdata, _, _, _, _, _ = read_dataset(testdata_path)
+        predict(testdata, test_language, open("{}/{}-{}-out".format(exp_path,test_language,setting),"w"))

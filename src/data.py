@@ -1,8 +1,6 @@
 EOS = "<EOS>"
 UNK = "<UNK>"
 NONE = "_"
-ADV = "<ADV>"
-PROPN = "<PROPN>"
 
 WF = 0
 LEMMA = 1
@@ -34,8 +32,6 @@ def read_dataset(fn):
         line = line.strip('\n')
         if line:
             wf, lemma, msd = line.split('\t')
-            if msd == 'PROPN;SG': wf = PROPN
-            elif msd == 'ADV': wf = ADV
             data[-1].append([wf,lemma,msd])
             count(data[-1][-1],wf2id,lemma2id,char2id,msd2id,msd2id_split)
         else:
